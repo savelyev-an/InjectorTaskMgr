@@ -11,44 +11,66 @@
 *  Hooker.h
 *  dllmain.cpp
 ********************************************************************************************************/
-
+#pragma once
 #include <Windows.h>
 #include <stdlib.h>
 #include "Commctrl.h"
 #include "Hooker.h"
 
 typedef LONG NTSTATUS;							//  ====> #include <ntdef.h>
+HANDLE hOut = NULL;								// 
 
-int prevColumn = -1;							// 
-bool isAffinityColumnTitled = false;			// Title affinity column flag will be set "false" during checkColumns()
-HWND processesWindow = nullptr;					// store the windowHandle for renovation
-#define PID unsigned
-#define MAX_PROCESSES_COUNT 1000
-PID Pids[MAX_PROCESSES_COUNT] = { 0 };			// store Pids for renovation the right row when affinity changed
-LVITEM storedLvItem;							// LvItem for none sequencial writing
-bool isLvItemStored = false;					// IsLvItemStored
+extern "C"
+// http://www.sql.ru/forum/214050/dll-i-konsol 
+{
+	__declspec(dllexport) void CreateConsole()
+	{
+		if (hOut == NULL)
+		{
+			AllocConsole();
+			hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+		}
 
-#define PROCCESS_WINDOW_DWSTYLE 1342177356		// mask for finding process Window
+	}
 
-#define PID_COLUMN_TITLE L"ИД процесса"
-#define DESCRIPTION_COLUMN_TITLE L"Описание"
-#define AFFINITY_COLUMN_TITLE L"Process Affinity"
-int totalColumn = -1;							// used as flag for checking columns
-int pidColumn = -1;							    // pid column
-int  AffinityColumn = -1;						// column for affinity writing
-bool needWriteFirstRowAffinity = false;			// flag for finished column counting and first row writing
-bool ListViewIsReady = false;
-#define LVM_SOMETHING 11						// I don't find this constant
+	__declspec(dllexport) void DestroyConsole()
+	{
+		if (hOut != NULL)
+		{
+			FreeConsole();
+			hOut = NULL;
+		}
 
-// #include <fstream> // debug
-// std::ofstream file; //debug
+	}
 
-int counter = 0;
+	__declspec(dllexport) void PrintOnConsole(wchar_t *pTxt)
+	{
+		DWORD NumberOfCharsWritten;
+		WriteConsole(hOut, pTxt, lstrlen(pTxt), &NumberOfCharsWritten, NULL);
+	}
+}
 
 /*
 *  The main funcionality of the project: send messages with the processors affinity
 */
 namespace nsSendMessageW {
+#ifndef JUST_CONTAINER
+#define PROCCESS_WINDOW_DWSTYLE 1342177356		// mask for finding process Window
+	HWND processesWindow = nullptr;					// store the windowHandle for renovation
+	bool isAffinityColumnTitled = false;			// Title affinity column flag will be set "false" during checkColumns()
+#define PID unsigned
+#define MAX_PROCESSES_COUNT 1000
+	PID Pids[MAX_PROCESSES_COUNT] = { 0 };			// store Pids for renovation the right row when affinity changed
+#define NAME_COLUMN_TITLE L"Имя"
+#define PID_COLUMN_TITLE L"ИД процесса"
+#define DESCRIPTION_COLUMN_TITLE L"Описание"
+#define AFFINITY_COLUMN_TITLE L"Process Affinity"
+	int pidColumn = -1;							    // pid column
+	int  AffinityColumn = -1;						// column for affinity writing
+
+	LVITEM storedLvItem;							// LvItem for none sequencial writing
+	bool isLvItemStored = false;					// IsLvItemStored
+#endif
 
 	/*
 	* Hooking function
@@ -65,7 +87,7 @@ namespace nsSendMessageW {
 	/*
 	* inserting (replacing) new column
 	*/
-	static void setNameAffinityColumn();
+	static void titleAffinityColumn();
 
 	/*
 	* Call original function SendMessageW
@@ -75,29 +97,20 @@ namespace nsSendMessageW {
 	/*
 	*  find aim columns
 	*/
-	static void checkColumns();
+	static void checkColumns(HWND hwnd);
 
 	LRESULT WINAPI hookFunction(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 	{
-		// file << (int)hwnd << " ; " << msg << " ; " << wparam << " ; " << lparam << std::endl; debug
+		// check the window
+		if ((processesWindow == nullptr) && (msg == LVM_INSERTITEMW || msg == LVM_SETITEMW)) { // first message come, ListViewIsReady
+			checkColumns(hwnd);
+		}
+
 		if (hwnd == processesWindow) {
 
-			if (totalColumn == -1 && (msg == LVM_INSERTITEMW || msg == LVM_SETITEMW)) { // first message come, ListViewIsReady
-				ListViewIsReady = true;
-			}
-
-			if (ListViewIsReady && totalColumn == -1) {
-				ListViewIsReady = false;
-				checkColumns();
-			}
-
-			if (msg == LVM_DELETECOLUMN || msg == LVM_INSERTCOLUMN) {
-				checkColumns();
-			}
-
-			if (!isAffinityColumnTitled && totalColumn != -1) {
+			if (!isAffinityColumnTitled && processesWindow == hwnd) {
 				isAffinityColumnTitled = true;
-				setNameAffinityColumn();
+				titleAffinityColumn();
 			}
 
 			if (msg == LVM_INSERTITEMW || msg == LVM_SETITEMW)//Intercepts LVM_INSERTITEM and LVM_SETITEM messages
@@ -125,17 +138,19 @@ namespace nsSendMessageW {
 					getProcessAffinityByPID(Pids[row], buffer, bufLength);
 					((LVITEMW*)lparam)->pszText = buffer;
 				}
-				prevColumn = column;
 			};
-
 		}
 
 		LRESULT result = callOrigSendMessageW(hwnd, msg, wparam, lparam);//Calls the real SendMessage function.
+		
+		if (hwnd == processesWindow && (msg == LVM_DELETECOLUMN || msg == LVM_INSERTCOLUMN)) {
+			checkColumns(processesWindow);
+		}
 
 		return result;
 	}
 
-	static void setNameAffinityColumn() {
+	static void titleAffinityColumn() {
 		LVCOLUMNW lvColumn;
 		lvColumn.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT ;
 		lvColumn.fmt = LVCFMT_LEFT;
@@ -194,114 +209,62 @@ namespace nsSendMessageW {
 		return result;
 	}
 
-	static void checkColumns() {
-		HWND hWndHdr = (HWND)SendMessage(processesWindow, LVM_GETHEADER, 0, 0);
+	static void checkColumns(HWND hWnd) {
+		wchar_t buffer[200];
+		wsprintf(buffer, L"\n checkColumns started \n");
+		PrintOnConsole(buffer);
+
+		// если у нас не заполнено processWindow должны попоробовать взять //проверяем наличие Name и PID
+		HWND hWndHdr = (HWND)SendMessage(hWnd, LVM_GETHEADER, 0, 0);
 		int columnCount = (int)SendMessage(hWndHdr, HDM_GETITEMCOUNT, 0, 0L); //items of ListView header are columns
-		int itemCount = SendMessage(processesWindow, LVM_GETITEMCOUNT, 0, 0);
-		for (int i = 1; i<20; i++) {
+		// int itemCount = SendMessage(hWnd, LVM_GETITEMCOUNT, 0, 0); count all items
+		int nameColumn = -1;
+		AffinityColumn = -1;
+
+		for (int i = 0; i<columnCount; i++) {
 			LVCOLUMN lvc;
-			lvc.mask = LVCF_TEXT;
+			lvc.mask = LVCF_TEXT ;
 			lvc.pszText = new wchar_t[255];
 			lvc.cchTextMax = 255;
 			wcscpy_s(lvc.pszText, 30, L"");
+			lvc.iSubItem = 0;
+			SendMessage(hWnd, LVM_GETCOLUMN, i, (LPARAM)&lvc);
+			PrintOnConsole(lvc.pszText);
+			wsprintf(buffer, L" i= %d iSubItem=%d \n", i, lvc.iSubItem);
+			PrintOnConsole(buffer);
 
-			SendMessage(processesWindow, LVM_GETCOLUMN, i, (LPARAM)&lvc);
+			if (wcscmp(lvc.pszText, NAME_COLUMN_TITLE) == 0) {
+				nameColumn = i;
+			}
 
 			if (wcscmp(lvc.pszText, PID_COLUMN_TITLE ) == 0) {
 				pidColumn = i;
 			}
 
-			if (wcscmp(lvc.pszText, DESCRIPTION_COLUMN_TITLE)			== 0||
-				wcscmp(lvc.pszText, AFFINITY_COLUMN_TITLE)	== 0 )
+			if (wcscmp(lvc.pszText, DESCRIPTION_COLUMN_TITLE)	== 0||
+				wcscmp(lvc.pszText, AFFINITY_COLUMN_TITLE)		== 0 )
 				AffinityColumn = i;
 
 			if (wcscmp(lvc.pszText, L"") == 0) {
-				totalColumn = i;
 				break;
 			}
 		}
 
-		//file.open("d:\\logDLLInhection.txt"); //debug
-		//file << AffinityColumn << std::endl;
-		//file << pidColumn << std::endl;
-		//file << TOTAL << std::endl;
-		//file.close();
-	}
-
-}
-
-/*
-*  prohibit sorting at the processes window
-*  and findig the processes window
-*/
-namespace nsCreateWindowExW {
-	// Forward declaration
-	HWND WINAPI hookFunction(
-		_In_     DWORD     dwExStyle,
-		_In_opt_ LPCTSTR   lpClassName,
-		_In_opt_ LPCTSTR   lpWindowName,
-		_In_     DWORD     dwStyle,
-		_In_     int       x,
-		_In_     int       y,
-		_In_     int       nWidth,
-		_In_     int       nHeight,
-		_In_opt_ HWND      hWndParent,
-		_In_opt_ HMENU     hMenu,
-		_In_opt_ HINSTANCE hInstance,
-		_In_opt_ LPVOID    lpParam
-	);
-
-	Hooker hooker = Hooker(L"User32.dll", "CreateWindowExW", hookFunction);
-
-	HWND WINAPI hookFunction(
-		_In_     DWORD     dwExStyle,
-		_In_opt_ LPCTSTR   lpClassName,
-		_In_opt_ LPCTSTR   lpWindowName,
-		_In_     DWORD     dwStyle,
-		_In_     int       x,
-		_In_     int       y,
-		_In_     int       nWidth,
-		_In_     int       nHeight,
-		_In_opt_ HWND      hWndParent,
-		_In_opt_ HMENU     hMenu,
-		_In_opt_ HINSTANCE hInstance,
-		_In_opt_ LPVOID    lpParam
-	) {
-		/*
-		file <<"Window creation: " << " ; " << (int)result << " ; " << dwExStyle << " ; " << lpClassName << " ; " << lpWindowName
-		<< " ; " << dwStyle << " ; " << hWndParent  << " ; " << hMenu << " ; " << hInstance << " ; " << lpParam <<std::endl;
-		*/
-		bool isProcessWindow = false;
-		// find the processWindow
-		if (dwStyle == PROCCESS_WINDOW_DWSTYLE) {
-			dwStyle = dwStyle | LVS_NOSORTHEADER;  // prohibit sorting
-			isProcessWindow = true;
+		if (processesWindow == nullptr && nameColumn != -1 && pidColumn != -1) {
+			processesWindow = hWnd;
 		}
 
-		hooker.UnLockMemory();
-		hooker.RestoreCalling();
-		HWND result = CreateWindowExW(
-			dwExStyle,
-			lpClassName,
-			lpWindowName,
-			dwStyle,
-			x,
-			y,
-			nWidth,
-			nHeight,
-			hWndParent,
-			hMenu,
-			hInstance,
-			lpParam);
-		hooker.InsertTrampoline();
-		hooker.LockMemory();
-
-		if (processesWindow == nullptr && isProcessWindow) {
-			processesWindow = result;
+		if (AffinityColumn != -1) {
+			isAffinityColumnTitled = false;
 		}
-		return result;
+
+		wsprintf(buffer, L"checkColumns done \n columnCount=%d   \n", columnCount);
+		PrintOnConsole(buffer);
+		wsprintf(buffer, L"nameCount=%d pidColumn=%d  affinityColumn=%d \n", nameColumn, pidColumn, AffinityColumn);
+		PrintOnConsole(buffer);
 	}
 }
+
 
 /*
 * Provide the rewriting for the action of the changing affinity
@@ -362,11 +325,11 @@ namespace nsNtSetInformationProcess {
 				int row = findRowByPID(pid);
 				// отправим данные 
 				if (row != -1) {
-					LVITEM lvItem = storedLvItem;
+					LVITEM lvItem = nsSendMessageW::storedLvItem;
 					lvItem.iItem = row;
-					lvItem.iSubItem = AffinityColumn;
+					lvItem.iSubItem = nsSendMessageW::AffinityColumn;
 					lvItem.pszText = (LPWSTR)L"this String will be replaced by nsSendMessageW::hookFunction";
-					SendMessageW(processesWindow, LVM_SETITEMW, AffinityColumn, (LPARAM)&lvItem);
+					SendMessageW(processesWindow, LVM_SETITEMW, nsSendMessageW::AffinityColumn, (LPARAM)&lvItem);
 					// debug
 					//wchar_t affinitySring[30];
 					//nsSendMessageW::getProcessAffinityByPID(pid, affinitySring, 30);
@@ -381,7 +344,7 @@ namespace nsNtSetInformationProcess {
 	static int findRowByPID(PID pid) {
 		int result = -1; // this is an error message
 		for (int i = 0; i < MAX_PROCESSES_COUNT; i++) {
-			if (Pids[i] == pid) {
+			if (nsSendMessageW::Pids[i] == pid) {
 				result = i;
 				break;
 			}
@@ -390,4 +353,74 @@ namespace nsNtSetInformationProcess {
 	}
 };
 
+/*
+*  prohibit sorting at the processes window
+*  and findig the processes window
+*/
+namespace nsCreateWindowExW {
+	// Forward declaration
+	HWND WINAPI hookFunction(
+		_In_     DWORD     dwExStyle,
+		_In_opt_ LPCTSTR   lpClassName,
+		_In_opt_ LPCTSTR   lpWindowName,
+		_In_     DWORD     dwStyle,
+		_In_     int       x,
+		_In_     int       y,
+		_In_     int       nWidth,
+		_In_     int       nHeight,
+		_In_opt_ HWND      hWndParent,
+		_In_opt_ HMENU     hMenu,
+		_In_opt_ HINSTANCE hInstance,
+		_In_opt_ LPVOID    lpParam
+	);
 
+	Hooker hooker = Hooker(L"User32.dll", "CreateWindowExW", hookFunction);
+
+	HWND WINAPI hookFunction(
+		_In_     DWORD     dwExStyle,
+		_In_opt_ LPCTSTR   lpClassName,
+		_In_opt_ LPCTSTR   lpWindowName,
+		_In_     DWORD     dwStyle,
+		_In_     int       x,
+		_In_     int       y,
+		_In_     int       nWidth,
+		_In_     int       nHeight,
+		_In_opt_ HWND      hWndParent,
+		_In_opt_ HMENU     hMenu,
+		_In_opt_ HINSTANCE hInstance,
+		_In_opt_ LPVOID    lpParam
+	) {
+		/*
+		file <<"Window creation: " << " ; " << (int)result << " ; " << dwExStyle << " ; " << lpClassName << " ; " << lpWindowName
+		<< " ; " << dwStyle << " ; " << hWndParent  << " ; " << hMenu << " ; " << hInstance << " ; " << lpParam <<std::endl;
+		*/
+		bool isProcessWindow = false;
+		// find the processWindow
+		if (dwStyle == PROCCESS_WINDOW_DWSTYLE) {
+			dwStyle = dwStyle | LVS_NOSORTHEADER;  // prohibit sorting
+		}
+
+		hooker.UnLockMemory();
+		hooker.RestoreCalling();
+		HWND result = CreateWindowExW(
+			dwExStyle,
+			lpClassName,
+			lpWindowName,
+			dwStyle,
+			x,
+			y,
+			nWidth,
+			nHeight,
+			hWndParent,
+			hMenu,
+			hInstance,
+			lpParam);
+		hooker.InsertTrampoline();
+		hooker.LockMemory();
+
+		if (processesWindow == nullptr && isProcessWindow) {
+			processesWindow = result;
+		}
+		return result;
+	}
+}
